@@ -1,0 +1,14 @@
+node_modules
+.pnpm-store
+.DS_Store
+.env
+.dist
+.dist-*
+dist
+
+# logs
+*.log
+
+# build outputs
+apps/**/dist
+packages/**/dist

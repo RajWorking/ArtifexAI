@@ -51,14 +51,19 @@ export type AuditStartResponse = {
   } | null;
 };
 
-export type AuditStage = "coverage" | "selecting" | "running" | "packaging" | "report" | "complete";
+export type AuditStage = "coverage" | "selecting" | "running" | "packaging" | "report" | "complete" | "failed";
+
+export type LogEntry = {
+  message: string;
+  level: "info" | "error";
+};
 
 export type AuditStatusResponse = {
   ok: boolean;
   auditId: string;
   stage: AuditStage;
   progress: number;
-  logs: string[];
+  logs: LogEntry[];
   error: {
     message: string;
   } | null;

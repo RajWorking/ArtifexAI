@@ -7,7 +7,8 @@ import {
   AuditStartResponse,
   AuditStatusResponse,
   AuditResultsResponse,
-  AuditStage
+  AuditStage,
+  LogEntry
 } from "./types.js";
 import { config } from "./config.js";
 import { loadHunts, loadHunt, getHuntSummary } from "./huntLoader.js";
@@ -18,7 +19,7 @@ interface AuditSession {
   id: string;
   stage: AuditStage;
   progress: number;
-  logs: string[];
+  logs: LogEntry[];
   startedAt: number;
   config: {
     command?: string;
@@ -32,6 +33,10 @@ interface AuditSession {
 
 const auditSessions = new Map<string, AuditSession>();
 import type { Finding } from "./types.js";
+
+function log(session: AuditSession, message: string, level: LogEntry["level"] = "info") {
+  session.logs.push({ message: `[${new Date().toISOString()}] ${message}`, level });
+}
 
 const splunkConnectSchema = z.object({
   command: z.string().min(1).optional(),
@@ -346,10 +351,10 @@ export async function registerRoutes(app: FastifyInstance) {
       stage: "coverage",
       progress: 0,
       logs: [
-        `[${new Date().toISOString()}] Audit session created`,
-        `[${new Date().toISOString()}] Time range: ${parsed.data.timeRange} days`,
-        parsed.data.scope ? `[${new Date().toISOString()}] Scope: ${parsed.data.scope}` : null
-      ].filter(Boolean) as string[],
+        { message: `[${new Date().toISOString()}] Audit session created`, level: "info" as const },
+        { message: `[${new Date().toISOString()}] Time range: ${parsed.data.timeRange} days`, level: "info" as const },
+        ...(parsed.data.scope ? [{ message: `[${new Date().toISOString()}] Scope: ${parsed.data.scope}`, level: "info" as const }] : [])
+      ],
       startedAt: Date.now(),
       config: parsed.data,
       findings: []
@@ -495,14 +500,14 @@ function simulateAuditProgress(auditId: string): void {
     if (stageInfo.stage === "coverage") {
       if (config.mockMode) {
         // Mock mode: simulate Splunk coverage check
-        session.logs.push(`[${new Date().toISOString()}] [MOCK] Connecting to Splunk instance...`);
-        session.logs.push(`[${new Date().toISOString()}] [MOCK] Connection established successfully`);
-        session.logs.push(`[${new Date().toISOString()}] [MOCK] Discovered 5 MCP tools: get_splunk_info, run_splunk_query, get_indexes, get_saved_searches, get_alerts`);
-        session.logs.push(`[${new Date().toISOString()}] [MOCK] Validating API credentials...`);
-        session.logs.push(`[${new Date().toISOString()}] [MOCK] Credentials validated - get_splunk_info responded`);
-        session.logs.push(`[${new Date().toISOString()}] [MOCK] Analyzing log sources coverage...`);
-        session.logs.push(`[${new Date().toISOString()}] [MOCK] Found 6 indexes: main, _internal, _audit, wineventlog, sysmon, network`);
-        session.logs.push(`[${new Date().toISOString()}] [MOCK] Coverage check complete`);
+        log(session, "[MOCK] Connecting to Splunk instance...");
+        log(session, "[MOCK] Connection established successfully");
+        log(session, "[MOCK] Discovered 5 MCP tools: get_splunk_info, run_splunk_query, get_indexes, get_saved_searches, get_alerts");
+        log(session, "[MOCK] Validating API credentials...");
+        log(session, "[MOCK] Credentials validated - get_splunk_info responded");
+        log(session, "[MOCK] Analyzing log sources coverage...");
+        log(session, "[MOCK] Found 6 indexes: main, _internal, _audit, wineventlog, sysmon, network");
+        log(session, "[MOCK] Coverage check complete");
       } else {
       const mcpCommand = session.config.command || config.splunkMcpCommand || "npx";
       const mcpArgs = session.config.args || config.splunkMcpArgs || [];
@@ -510,33 +515,33 @@ function simulateAuditProgress(auditId: string): void {
 
       let client: Awaited<ReturnType<typeof createMcpClient>> | null = null;
       try {
-        session.logs.push(`[${new Date().toISOString()}] Connecting to Splunk instance...`);
+        log(session, "Connecting to Splunk instance...");
         client = await createMcpClient({
           name: "artifexai-coverage",
           version: "0.1.0",
           timeoutMs: config.requestTimeoutMs,
           transport: { type: "stdio", command: mcpCommand, args: mcpArgs, env: mcpEnv }
         });
-        session.logs.push(`[${new Date().toISOString()}] Connection established successfully`);
+        log(session, "Connection established successfully");
 
         const tools = await client.listTools();
         const toolNames = tools.map(t => t.name);
-        session.logs.push(`[${new Date().toISOString()}] Discovered ${toolNames.length} MCP tools: ${toolNames.join(", ")}`);
+        log(session, `Discovered ${toolNames.length} MCP tools: ${toolNames.join(", ")}`);
 
         // Validate credentials via get_splunk_info
-        session.logs.push(`[${new Date().toISOString()}] Validating API credentials...`);
+        log(session, "Validating API credentials...");
         const infoTool = pickTool(toolNames, infoToolPreference);
         if (infoTool) {
           const info = await client.callTool(infoTool, {}) as any;
           const infoText = info?.content?.[0]?.text ?? JSON.stringify(info);
-          session.logs.push(`[${new Date().toISOString()}] Credentials validated - ${infoTool} responded`);
+          log(session, `Credentials validated - ${infoTool} responded`);
           (session as any).splunkInfo = infoText;
         } else {
-          session.logs.push(`[${new Date().toISOString()}] No info tool found - skipping credential validation`);
+          log(session, "No info tool found - skipping credential validation");
         }
 
         // Check log source coverage via get_indexes
-        session.logs.push(`[${new Date().toISOString()}] Analyzing log sources coverage...`);
+        log(session, "Analyzing log sources coverage...");
         const indexTool = pickTool(toolNames, ["get_indexes"] as unknown as readonly string[]);
         if (indexTool) {
           const indexes = await client.callTool(indexTool, {}) as any;
@@ -547,21 +552,25 @@ function simulateAuditProgress(auditId: string): void {
             const items = parsed?.results ?? (Array.isArray(parsed) ? parsed : null);
             if (Array.isArray(items)) {
               const indexNames = items.map((i: any) => i.name || i.title || i);
-              session.logs.push(`[${new Date().toISOString()}] Found ${indexNames.length} indexes: ${indexNames.slice(0, 10).join(", ")}${indexNames.length > 10 ? "..." : ""}`);
+              log(session, `Found ${indexNames.length} indexes: ${indexNames.slice(0, 10).join(", ")}${indexNames.length > 10 ? "..." : ""}`);
             } else {
-              session.logs.push(`[${new Date().toISOString()}] Indexes retrieved successfully`);
+              log(session, "Indexes retrieved successfully");
             }
           } catch {
-            session.logs.push(`[${new Date().toISOString()}] Indexes retrieved successfully`);
+            log(session, "Indexes retrieved successfully");
           }
         } else {
-          session.logs.push(`[${new Date().toISOString()}] No index tool found - skipping coverage analysis`);
+          log(session, "No index tool found - skipping coverage analysis");
         }
 
-        session.logs.push(`[${new Date().toISOString()}] Coverage check complete`);
+        log(session, "Coverage check complete");
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Unknown error";
-        session.logs.push(`[${new Date().toISOString()}] Coverage check failed: ${msg}`);
+        log(session, `Coverage check failed: ${msg}`, "error");
+        session.stage = "failed";
+        session.progress = 0;
+        log(session, "Audit aborted — could not connect to Splunk instance", "error");
+        return; // Stop the pipeline
       } finally {
         if (client) {
           try { await client.close(); } catch { /* ignore */ }
@@ -572,23 +581,23 @@ function simulateAuditProgress(auditId: string): void {
       try {
         // Load all available hunts
         const hunts = await loadHunts();
-        session.logs.push(`[${new Date().toISOString()}] Loaded ${hunts.length} threat hunting playbooks`);
-        session.logs.push(`[${new Date().toISOString()}] Prioritizing hunts by threat level...`);
-        session.logs.push(`[${new Date().toISOString()}] Hunt selection complete`);
+        log(session, `Loaded ${hunts.length} threat hunting playbooks`);
+        log(session, "Prioritizing hunts by threat level...");
+        log(session, "Hunt selection complete");
 
         // Store hunts in session for running stage
         (session as any).hunts = hunts;
       } catch (err) {
-        session.logs.push(`[${new Date().toISOString()}] Error loading hunts: ${err instanceof Error ? err.message : "Unknown error"}`);
+        log(session, `Error loading hunts: ${err instanceof Error ? err.message : "Unknown error"}`, "error");
       }
     } else if (stageInfo.stage === "running") {
       // Execute hunts using LLM
       const hunts = (session as any).hunts || [];
 
       if (hunts.length === 0) {
-        session.logs.push(`[${new Date().toISOString()}] No hunts available to execute`);
+        log(session, "No hunts available to execute");
       } else {
-        session.logs.push(`[${new Date().toISOString()}] Starting LLM-guided threat hunting...`);
+        log(session, "Starting LLM-guided threat hunting...");
 
         // Prepare executor config from session config
         const executorConfig: HuntExecutorConfig = {
@@ -601,36 +610,38 @@ function simulateAuditProgress(auditId: string): void {
         // Execute each hunt
         for (const hunt of hunts) {
           try {
-            session.logs.push(`[${new Date().toISOString()}] Executing hunt: ${hunt.id}`);
+            log(session, `Executing hunt: ${hunt.id}`);
 
-            const findings = await executeHunt(hunt, executorConfig);
+            const findings = await executeHunt(hunt, executorConfig, (msg, level) => {
+              log(session, `  [${hunt.id}] ${msg}`, level);
+            });
 
             if (findings.length > 0) {
               session.findings.push(...findings);
-              session.logs.push(`[${new Date().toISOString()}] Hunt ${hunt.id} completed - ${findings.length} finding(s) identified`);
+              log(session, `Hunt ${hunt.id} completed - ${findings.length} finding(s) identified`);
             } else {
-              session.logs.push(`[${new Date().toISOString()}] Hunt ${hunt.id} completed - no suspicious activity detected`);
+              log(session, `Hunt ${hunt.id} completed - no suspicious activity detected`);
             }
           } catch (err) {
             const errorMsg = err instanceof Error ? err.message : "Unknown error";
-            session.logs.push(`[${new Date().toISOString()}] Hunt ${hunt.id} failed: ${errorMsg}`);
+            log(session, `Hunt ${hunt.id} failed: ${errorMsg}`, "error");
           }
         }
 
-        session.logs.push(`[${new Date().toISOString()}] All hunts completed - ${session.findings.length} total finding(s)`);
+        log(session, `All hunts completed - ${session.findings.length} total finding(s)`);
       }
     } else if (stageInfo.stage === "packaging") {
       const evidenceCount = session.findings.reduce((sum, f) => sum + f.evidenceCount, 0);
-      session.logs.push(`[${new Date().toISOString()}] Collecting evidence artifacts...`);
-      session.logs.push(`[${new Date().toISOString()}] Packaging evidence items...`);
-      session.logs.push(`[${new Date().toISOString()}] Evidence collection complete - ${evidenceCount} items`);
+      log(session, "Collecting evidence artifacts...");
+      log(session, "Packaging evidence items...");
+      log(session, `Evidence collection complete - ${evidenceCount} items`);
     } else if (stageInfo.stage === "report") {
-      session.logs.push(`[${new Date().toISOString()}] Generating executive summary...`);
-      session.logs.push(`[${new Date().toISOString()}] Compiling detailed findings...`);
-      session.logs.push(`[${new Date().toISOString()}] Generating recommendations...`);
-      session.logs.push(`[${new Date().toISOString()}] Report generation complete`);
+      log(session, "Generating executive summary...");
+      log(session, "Compiling detailed findings...");
+      log(session, "Generating recommendations...");
+      log(session, "Report generation complete");
     } else if (stageInfo.stage === "complete") {
-      session.logs.push(`[${new Date().toISOString()}] Audit complete - results ready for review`);
+      log(session, "Audit complete - results ready for review");
     }
 
     currentStageIndex++;

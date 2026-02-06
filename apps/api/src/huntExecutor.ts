@@ -4,6 +4,9 @@ import type { Finding } from "./types.js";
 import type { Hunt } from "./huntLoader.js";
 import { config } from "./config.js";
 
+export type LogLevel = "info" | "error";
+export type LogCallback = (message: string, level?: LogLevel) => void;
+
 export interface HuntExecutorConfig {
   mcpCommand: string;
   mcpArgs: string[];
@@ -155,11 +158,13 @@ const MOCK_FINDINGS: Finding[] = [
  */
 export async function executeHunt(
   hunt: Hunt,
-  executorConfig: HuntExecutorConfig
+  executorConfig: HuntExecutorConfig,
+  onLog?: LogCallback
 ): Promise<Finding[]> {
+  const emit = onLog ?? (() => {});
+
   if (config.mockMode) {
-    console.log(`[Hunt Executor] MOCK MODE - Returning dummy findings for hunt: ${hunt.id}`);
-    // Simulate processing delay
+    emit("MOCK MODE - returning dummy findings");
     await new Promise(resolve => setTimeout(resolve, 2000));
     return MOCK_FINDINGS.map(f => ({ ...f, id: `${hunt.id}-${f.id}` }));
   }
@@ -176,6 +181,7 @@ export async function executeHunt(
   let mcpClient: Awaited<ReturnType<typeof createMcpClient>> | null = null;
 
   try {
+    emit("Connecting to Splunk MCP for query execution...");
     mcpClient = await createMcpClient({
       name: "hunt-executor",
       version: "1.0.0",
@@ -198,6 +204,8 @@ export async function executeHunt(
       throw new Error("No query tool found in Splunk MCP server");
     }
 
+    emit("Sending hunt playbook to LLM for analysis...");
+
     // Initial message to Claude with the hunt
     const messages: Anthropic.MessageParam[] = [
       {
@@ -216,6 +224,8 @@ export async function executeHunt(
     while (continueLoop && iterations < maxIterations) {
       iterations++;
 
+      emit(`LLM thinking... (iteration ${iterations})`);
+
       const response = await anthropic.messages.create({
         model: "claude-sonnet-4-20250514",
         max_tokens: 8000,
@@ -223,6 +233,15 @@ export async function executeHunt(
         messages,
         tools: [EXECUTE_QUERY_TOOL]
       });
+
+      // Log any text blocks (LLM reasoning)
+      for (const block of response.content) {
+        if (block.type === "text" && block.text.trim()) {
+          // Show a truncated preview of the LLM's thinking
+          const preview = block.text.trim().substring(0, 150);
+          emit(`LLM: ${preview}${block.text.length > 150 ? "..." : ""}`);
+        }
+      }
 
       // Add assistant's response to conversation
       messages.push({
@@ -241,8 +260,8 @@ export async function executeHunt(
           if (block.type === "tool_use" && block.name === "execute_splunk_query") {
             const input = block.input as { spl: string; description: string };
 
-            console.log(`[Hunt Executor] Executing query: ${input.description}`);
-            console.log(`[Hunt Executor] SPL: ${input.spl.substring(0, 100)}...`);
+            emit(`Executing query: ${input.description}`);
+            emit(`SPL: ${input.spl.substring(0, 120)}${input.spl.length > 120 ? "..." : ""}`);
             executedQueries.push(input.spl);
 
             try {
@@ -269,13 +288,18 @@ export async function executeHunt(
                 throw lastError || new Error("All query strategies failed");
               }
 
+              const resultStr = JSON.stringify(result, null, 2);
+              const resultLines = resultStr.split("\n").length;
+              emit(`Query returned ${resultLines} lines of results`);
+
               (toolResults.content as Anthropic.ToolResultBlockParam[]).push({
                 type: "tool_result",
                 tool_use_id: block.id,
-                content: JSON.stringify(result, null, 2)
+                content: resultStr
               });
             } catch (err) {
               const errorMsg = err instanceof Error ? err.message : "Unknown error";
+              emit(`Query failed: ${errorMsg}`, "error");
               (toolResults.content as Anthropic.ToolResultBlockParam[]).push({
                 type: "tool_result",
                 tool_use_id: block.id,
@@ -288,6 +312,7 @@ export async function executeHunt(
 
         messages.push(toolResults);
       } else if (response.stop_reason === "end_turn") {
+        emit("LLM analysis complete — extracting findings...");
         // Claude is done - extract findings from final response
         for (const block of response.content) {
           if (block.type === "text") {
@@ -296,11 +321,16 @@ export async function executeHunt(
         }
         continueLoop = false;
       } else {
-        // Unexpected stop reason
+        emit(`Unexpected stop reason: ${response.stop_reason}`, "error");
         continueLoop = false;
       }
     }
 
+    if (iterations >= maxIterations) {
+      emit("Max iterations reached — stopping", "error");
+    }
+
+    emit(`Found ${findings.length} finding(s) after ${executedQueries.length} queries`);
     return findings;
   } finally {
     if (mcpClient) {

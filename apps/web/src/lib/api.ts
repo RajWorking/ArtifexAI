@@ -15,12 +15,17 @@ export interface AuditStartResponse {
   error: { message: string } | null;
 }
 
+export interface LogEntry {
+  message: string;
+  level: "info" | "error";
+}
+
 export interface AuditStatusResponse {
   ok: boolean;
   auditId: string;
-  stage: "coverage" | "selecting" | "running" | "packaging" | "report" | "complete";
+  stage: "coverage" | "selecting" | "running" | "packaging" | "report" | "complete" | "failed";
   progress: number;
-  logs: string[];
+  logs: LogEntry[];
   error: { message: string } | null;
 }
 

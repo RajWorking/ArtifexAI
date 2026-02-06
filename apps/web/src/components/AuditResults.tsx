@@ -257,7 +257,7 @@ export function AuditResults() {
                       <TableRow
                         key={finding.id}
                         className={`cursor-pointer ${
-                          selectedFinding.id === finding.id ? "bg-blue-50" : ""
+                          selectedFinding?.id === finding.id ? "bg-blue-50" : ""
                         }`}
                         onClick={() => setSelectedFinding(finding)}
                       >
@@ -290,6 +290,7 @@ export function AuditResults() {
               <div className="px-6 py-4 border-b border-gray-200">
                 <h3 className="text-gray-900">Finding Details</h3>
               </div>
+              {selectedFinding ? (
               <div className="px-6 py-4 space-y-6 max-h-[800px] overflow-y-auto">
                 {/* Title and Severity */}
                 <div>
@@ -362,6 +363,16 @@ export function AuditResults() {
                   </p>
                 </div>
               </div>
+              ) : (
+              <div className="px-6 py-8 text-center text-gray-500">
+                <FileText className="w-8 h-8 mx-auto mb-3 text-gray-300" />
+                <p className="text-sm">
+                  {results.findings.length === 0
+                    ? "No findings to display"
+                    : "Select a finding to view details"}
+                </p>
+              </div>
+              )}
             </div>
           </div>
         </div>

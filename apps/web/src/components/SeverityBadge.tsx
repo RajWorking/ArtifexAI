@@ -39,9 +39,11 @@ const severityConfig = {
   },
 };
 
+const fallbackConfig = severityConfig.info;
+
 export function SeverityBadge({ severity }: SeverityBadgeProps) {
-  const config = severityConfig[severity];
-  
+  const config = severityConfig[severity] ?? fallbackConfig;
+
   return (
     <span
       className={`inline-flex items-center px-2 py-0.5 rounded border ${config.bg} ${config.text} ${config.border} text-xs`}

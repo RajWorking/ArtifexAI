@@ -1,14 +1,14 @@
 import React from "react";
-import { AlertCircle, AlertTriangle, CheckCircle } from "lucide-react";
+import { AlertCircle, AlertTriangle, CheckCircle, ShieldAlert } from "lucide-react";
 
-type RiskLevel = "low" | "medium" | "high";
+type RiskLevel = "low" | "medium" | "high" | "critical";
 
 interface RiskLevelBadgeProps {
   level: RiskLevel;
   className?: string;
 }
 
-const riskConfig = {
+const riskConfig: Record<RiskLevel, { bg: string; text: string; border: string; label: string; icon: typeof AlertCircle }> = {
   low: {
     bg: "bg-green-50",
     text: "text-green-700",
@@ -30,12 +30,21 @@ const riskConfig = {
     label: "High Risk",
     icon: AlertCircle,
   },
+  critical: {
+    bg: "bg-red-100",
+    text: "text-red-900",
+    border: "border-red-400",
+    label: "Critical Risk",
+    icon: ShieldAlert,
+  },
 };
 
+const fallbackConfig = riskConfig.medium;
+
 export function RiskLevelBadge({ level, className = "" }: RiskLevelBadgeProps) {
-  const config = riskConfig[level];
+  const config = riskConfig[level] ?? fallbackConfig;
   const Icon = config.icon;
-  
+
   return (
     <div
       className={`inline-flex items-center gap-2 px-3 py-2 rounded-lg border ${config.bg} ${config.text} ${config.border} ${className}`}

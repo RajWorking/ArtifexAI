@@ -6,6 +6,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
 
 export const config = {
+  mockMode: normalizeBoolean(process.env.MOCK_MODE) ?? false,
   port: Number(process.env.API_PORT ?? 4000),
   corsOrigin: process.env.CORS_ORIGIN ?? "http://localhost:3000",
   requestTimeoutMs: Number(process.env.REQUEST_TIMEOUT_MS ?? 10000),

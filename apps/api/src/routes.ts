@@ -493,6 +493,17 @@ function simulateAuditProgress(auditId: string): void {
 
     // Add stage-specific logs
     if (stageInfo.stage === "coverage") {
+      if (config.mockMode) {
+        // Mock mode: simulate Splunk coverage check
+        session.logs.push(`[${new Date().toISOString()}] [MOCK] Connecting to Splunk instance...`);
+        session.logs.push(`[${new Date().toISOString()}] [MOCK] Connection established successfully`);
+        session.logs.push(`[${new Date().toISOString()}] [MOCK] Discovered 5 MCP tools: get_splunk_info, run_splunk_query, get_indexes, get_saved_searches, get_alerts`);
+        session.logs.push(`[${new Date().toISOString()}] [MOCK] Validating API credentials...`);
+        session.logs.push(`[${new Date().toISOString()}] [MOCK] Credentials validated - get_splunk_info responded`);
+        session.logs.push(`[${new Date().toISOString()}] [MOCK] Analyzing log sources coverage...`);
+        session.logs.push(`[${new Date().toISOString()}] [MOCK] Found 6 indexes: main, _internal, _audit, wineventlog, sysmon, network`);
+        session.logs.push(`[${new Date().toISOString()}] [MOCK] Coverage check complete`);
+      } else {
       const mcpCommand = session.config.command || config.splunkMcpCommand || "npx";
       const mcpArgs = session.config.args || config.splunkMcpArgs || [];
       const mcpEnv = session.config.env || buildSplunkEnv();
@@ -555,6 +566,7 @@ function simulateAuditProgress(auditId: string): void {
         if (client) {
           try { await client.close(); } catch { /* ignore */ }
         }
+      }
       }
     } else if (stageInfo.stage === "selecting") {
       try {

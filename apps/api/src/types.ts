@@ -1,42 +1,34 @@
-export type SiemType = "splunk";
-
-export type SiemConnectRequest = {
-  siemType: "splunk";
-  baseUrl: string;
-  token: string;
-  verifySSL: boolean;
+export type SplunkConnectRequest = {
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  timeoutMs?: number;
 };
 
-export type SiemConnectResponse = {
+export type SplunkConnectResponse = {
   ok: boolean;
-  siemType: "splunk";
-  details?: {
-    serverName?: string;
-    version?: string;
-  };
-  error?: {
+  tools: string[];
+  details?: unknown;
+  error: {
     message: string;
     code?: string;
-  };
+  } | null;
 };
 
-export type AuditRunResponse = {
-  ok: boolean;
-  auditId: string;
-  status: "todo";
-  message: string;
+export type SplunkQueryRequest = {
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  spl: string;
+  timeoutMs?: number;
 };
 
-export type AuditStatusResponse = {
+export type SplunkQueryResponse = {
   ok: boolean;
-  auditId: string;
-  status: "todo";
-  message: string;
-};
-
-export type AuditReportResponse = {
-  ok: boolean;
-  auditId: string;
-  status: "todo";
-  message: string;
+  toolUsed: string | null;
+  result?: unknown;
+  error: {
+    message: string;
+    code?: string;
+  } | null;
 };

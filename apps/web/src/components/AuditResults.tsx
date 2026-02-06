@@ -1,27 +1,16 @@
-import React, { useState } from "react";
-import { useNavigate } from "react-router";
+import React, { useState, useEffect } from "react";
+import { useNavigate, useLocation } from "react-router";
 import { Header } from "./Header";
 import { RiskLevelBadge } from "./RiskLevelBadge";
 import { SeverityBadge } from "./SeverityBadge";
 import { Button } from "./ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
-import { FileText, Download } from "lucide-react";
+import { FileText, Download, Loader2 } from "lucide-react";
 import { Badge } from "./ui/badge";
+import { api, type Finding, type AuditResultsResponse } from "../lib/api";
 
-interface Finding {
-  id: string;
-  severity: "critical" | "high" | "medium" | "low";
-  title: string;
-  affectedEntities: string[];
-  evidenceCount: number;
-  confidence: number;
-  description: string;
-  evidence: string[];
-  queries: string[];
-  recommendation: string;
-}
-
-const mockFindings: Finding[] = [
+// Removed results.findings - now fetched from backend
+const _oldMockFindings: Finding[] = [
   {
     id: "F001",
     severity: "high",
@@ -121,11 +110,75 @@ const mockFindings: Finding[] = [
 
 export function AuditResults() {
   const navigate = useNavigate();
-  const [selectedFinding, setSelectedFinding] = useState<Finding>(mockFindings[0]);
+  const location = useLocation();
+  const auditId = location.state?.auditId;
+
+  const [results, setResults] = useState<AuditResultsResponse | null>(null);
+  const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!auditId) {
+      setError("No audit ID provided");
+      setTimeout(() => navigate("/"), 2000);
+      return;
+    }
+
+    const fetchResults = async () => {
+      try {
+        const data = await api.audit.results(auditId);
+
+        if (!data.ok) {
+          setError(data.error?.message || "Failed to fetch results");
+          return;
+        }
+
+        setResults(data);
+        if (data.findings.length > 0) {
+          setSelectedFinding(data.findings[0]);
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to fetch results");
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    fetchResults();
+  }, [auditId, navigate]);
 
   const handleDownloadReport = () => {
-    navigate("/report");
+    navigate("/report", { state: { auditId, results } });
   };
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-gray-50">
+        <Header />
+        <main className="max-w-[1440px] mx-auto px-8 py-8 flex items-center justify-center">
+          <div className="flex flex-col items-center gap-4">
+            <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
+            <p className="text-gray-600">Loading audit results...</p>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  if (error || !results) {
+    return (
+      <div className="min-h-screen bg-gray-50">
+        <Header />
+        <main className="max-w-[1440px] mx-auto px-8 py-8">
+          <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-red-700">
+            <p className="font-medium">Error</p>
+            <p className="text-sm">{error || "No results available"}</p>
+          </div>
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -152,19 +205,19 @@ export function AuditResults() {
             <div className="grid grid-cols-4 gap-6">
               <div>
                 <div className="text-sm text-gray-500 mb-2">Overall Risk Level</div>
-                <RiskLevelBadge level="medium" />
+                <RiskLevelBadge level={results.stats.riskLevel} />
               </div>
               <div>
                 <div className="text-sm text-gray-500 mb-2">Total Findings</div>
-                <div className="text-3xl text-gray-900">{mockFindings.length}</div>
+                <div className="text-3xl text-gray-900">{results.stats.totalFindings}</div>
               </div>
               <div>
                 <div className="text-sm text-gray-500 mb-2">Confidence Score</div>
-                <div className="text-3xl text-gray-900">89%</div>
+                <div className="text-3xl text-gray-900">{results.stats.avgConfidence}%</div>
               </div>
               <div>
                 <div className="text-sm text-gray-500 mb-2">Evidence Collected</div>
-                <div className="text-3xl text-gray-900">217</div>
+                <div className="text-3xl text-gray-900">{results.stats.evidenceCount}</div>
               </div>
             </div>
           </div>
@@ -176,7 +229,7 @@ export function AuditResults() {
             </div>
             <div className="px-6 py-4">
               <p className="text-gray-700 leading-relaxed">
-                The automated security audit identified <strong>5 findings</strong> across the target environment, including <strong>2 high-severity</strong> issues requiring immediate attention. The most critical concerns involve unauthorized privileged account usage and unpatched vulnerabilities on production web servers. While no active breaches were detected, the combination of weak access controls and outdated software creates significant risk exposure. Log coverage gaps on several critical systems limit visibility into potential security incidents. Overall, the security posture demonstrates typical enterprise challenges but requires prompt remediation of high-priority findings to reduce risk to acceptable levels.
+                {results.summary}
               </p>
             </div>
           </div>
@@ -200,7 +253,7 @@ export function AuditResults() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {mockFindings.map((finding) => (
+                    {results.findings.map((finding) => (
                       <TableRow
                         key={finding.id}
                         className={`cursor-pointer ${

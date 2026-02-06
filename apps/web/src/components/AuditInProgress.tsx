@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from "react";
-import { useNavigate } from "react-router";
+import { useNavigate, useLocation } from "react-router";
 import { Header } from "./Header";
 import { DashboardCard } from "./DashboardCard";
 import { Progress } from "./ui/progress";
 import { CheckCircle2, Circle, Loader2 } from "lucide-react";
+import { api } from "../lib/api";
 
 type StageStatus = "pending" | "in-progress" | "complete";
 
@@ -15,8 +16,11 @@ interface Stage {
 
 export function AuditInProgress() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const auditId = location.state?.auditId;
+
   const [stages, setStages] = useState<Stage[]>([
-    { id: "coverage", label: "Coverage Checks", status: "in-progress" },
+    { id: "coverage", label: "Coverage Checks", status: "pending" },
     { id: "selecting", label: "Selecting Hunts", status: "pending" },
     { id: "running", label: "Running Hunts", status: "pending" },
     { id: "packaging", label: "Packaging Evidence", status: "pending" },
@@ -24,89 +28,64 @@ export function AuditInProgress() {
   ]);
 
   const [progress, setProgress] = useState(0);
-  const [logs, setLogs] = useState<string[]>([
-    "[10:23:41] Connecting to Splunk instance...",
-    "[10:23:42] Connection established successfully",
-    "[10:23:43] Validating API credentials...",
-    "[10:23:44] Credentials validated - read-only access confirmed",
-    "[10:23:45] Starting coverage checks...",
-  ]);
+  const [logs, setLogs] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    // Simulate progress
-    const stageTimings = [
-      { stage: 0, time: 2000, progress: 15 },
-      { stage: 1, time: 3000, progress: 30 },
-      { stage: 2, time: 8000, progress: 70 },
-      { stage: 3, time: 2000, progress: 85 },
-      { stage: 4, time: 3000, progress: 100 },
-    ];
+    if (!auditId) {
+      setError("No audit ID provided");
+      setTimeout(() => navigate("/"), 2000);
+      return;
+    }
 
-    let currentStage = 0;
-    let logCounter = 5;
+    // Poll for audit status
+    const pollInterval = setInterval(async () => {
+      try {
+        const status = await api.audit.status(auditId);
 
-    const progressInterval = setInterval(() => {
-      if (currentStage >= stageTimings.length) {
-        clearInterval(progressInterval);
-        setTimeout(() => navigate("/audit/results"), 1000);
-        return;
+        if (!status.ok) {
+          setError(status.error?.message || "Failed to fetch audit status");
+          clearInterval(pollInterval);
+          return;
+        }
+
+        // Update progress
+        setProgress(status.progress);
+
+        // Update logs
+        setLogs(status.logs);
+
+        // Update stages based on current stage
+        const currentStageId = status.stage;
+        setStages(prev => prev.map(stage => {
+          const stageOrder = ["coverage", "selecting", "running", "packaging", "report"];
+          const currentIndex = stageOrder.indexOf(currentStageId);
+          const stageIndex = stageOrder.indexOf(stage.id);
+
+          if (stageIndex < currentIndex) {
+            return { ...stage, status: "complete" as StageStatus };
+          } else if (stageIndex === currentIndex) {
+            return { ...stage, status: currentStageId === "complete" ? "complete" : "in-progress" as StageStatus };
+          } else {
+            return { ...stage, status: "pending" as StageStatus };
+          }
+        }));
+
+        // Navigate to results when complete
+        if (status.stage === "complete") {
+          clearInterval(pollInterval);
+          setTimeout(() => {
+            navigate("/audit/results", { state: { auditId } });
+          }, 1000);
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to poll audit status");
+        clearInterval(pollInterval);
       }
+    }, 1000); // Poll every second
 
-      const { stage, time, progress: targetProgress } = stageTimings[currentStage];
-
-      // Update stage status
-      setStages((prev) =>
-        prev.map((s, idx) => {
-          if (idx < stage) return { ...s, status: "complete" as StageStatus };
-          if (idx === stage) return { ...s, status: "in-progress" as StageStatus };
-          return s;
-        })
-      );
-
-      // Update progress
-      setProgress(targetProgress);
-
-      // Add logs based on stage
-      const newLogs: string[] = [];
-      const timestamp = `[10:${23 + Math.floor(logCounter / 60)}:${(40 + logCounter) % 60}]`;
-      
-      switch (stage) {
-        case 0:
-          newLogs.push(`${timestamp} Analyzing log sources coverage...`);
-          break;
-        case 1:
-          newLogs.push(`${timestamp} Selected 47 threat hunting queries`);
-          break;
-        case 2:
-          newLogs.push(`${timestamp} Executing query: Privileged Account Usage`);
-          newLogs.push(`${timestamp} Executing query: Lateral Movement Detection`);
-          newLogs.push(`${timestamp} Executing query: Unauthorized Access Attempts`);
-          break;
-        case 3:
-          newLogs.push(`${timestamp} Collecting evidence artifacts...`);
-          break;
-        case 4:
-          newLogs.push(`${timestamp} Generating executive summary...`);
-          newLogs.push(`${timestamp} Compiling findings report...`);
-          break;
-      }
-
-      setLogs((prev) => [...prev, ...newLogs]);
-      logCounter += newLogs.length;
-
-      // Mark current stage complete and move to next
-      setTimeout(() => {
-        setStages((prev) =>
-          prev.map((s, idx) =>
-            idx === stage ? { ...s, status: "complete" as StageStatus } : s
-          )
-        );
-        currentStage++;
-      }, time - 500);
-    }, stageTimings[currentStage]?.time || 2000);
-
-    return () => clearInterval(progressInterval);
-  }, [navigate]);
+    return () => clearInterval(pollInterval);
+  }, [auditId, navigate]);
 
   const getStageIcon = (status: StageStatus) => {
     switch (status) {
@@ -131,6 +110,13 @@ export function AuditInProgress() {
               Running automated security analysis on your SIEM data...
             </p>
           </div>
+
+          {error && (
+            <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-red-700">
+              <p className="font-medium">Error</p>
+              <p className="text-sm">{error}</p>
+            </div>
+          )}
 
           {/* Progress Timeline */}
           <DashboardCard title="Progress" className="mb-6">

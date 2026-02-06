@@ -8,17 +8,56 @@ import { Input } from "./ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Textarea } from "./ui/textarea";
 import { Info } from "lucide-react";
+import { api } from "../lib/api";
 
 export function LandingPage() {
   const navigate = useNavigate();
   const [siemType, setSiemType] = useState("splunk");
-  const [baseUrl, setBaseUrl] = useState("");
+  const [baseUrl, setBaseUrl] = useState("https://localhost:8089/services/mcp");
   const [apiToken, setApiToken] = useState("");
   const [timeRange, setTimeRange] = useState("180");
   const [scope, setScope] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const handleRunAudit = () => {
-    navigate("/audit/in-progress");
+  const handleRunAudit = async () => {
+    if (!baseUrl || !apiToken) {
+      setError("Please provide both Base URL and API Token");
+      return;
+    }
+
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const result = await api.audit.start({
+        command: "npx",
+        args: [
+          "-y",
+          "mcp-remote",
+          baseUrl,
+          "--header",
+          `Authorization: Bearer ${apiToken}`
+        ],
+        env: {
+          NODE_TLS_REJECT_UNAUTHORIZED: "0"
+        },
+        timeRange,
+        scope: scope || undefined
+      });
+
+      if (result.ok) {
+        navigate("/audit/in-progress", {
+          state: { auditId: result.auditId }
+        });
+      } else {
+        setError(result.error?.message || "Failed to start audit");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to connect to backend");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (
@@ -112,12 +151,20 @@ export function LandingPage() {
 
           {/* Action Section */}
           <div className="space-y-4">
-            <Button 
+            {error && (
+              <div className="flex items-start gap-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-4 py-3">
+                <Info className="w-4 h-4 text-red-600 mt-0.5 flex-shrink-0" />
+                <span>{error}</span>
+              </div>
+            )}
+
+            <Button
               onClick={handleRunAudit}
               className="w-full h-12"
               size="lg"
+              disabled={isLoading || !baseUrl || !apiToken}
             >
-              Run Audit
+              {isLoading ? "Starting Audit..." : "Run Audit"}
             </Button>
 
             <div className="flex items-start gap-2 text-sm text-gray-600 bg-blue-50 border border-blue-200 rounded-lg px-4 py-3">

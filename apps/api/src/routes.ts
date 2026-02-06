@@ -10,6 +10,8 @@ import {
   AuditStage
 } from "./types.js";
 import { config } from "./config.js";
+import { loadHunts, loadHunt, getHuntSummary } from "./huntLoader.js";
+import { executeHunt, type HuntExecutorConfig } from "./huntExecutor.js";
 
 // In-memory store for audit sessions
 interface AuditSession {
@@ -25,9 +27,11 @@ interface AuditSession {
     timeRange: string;
     scope?: string;
   };
+  findings: Finding[];
 }
 
 const auditSessions = new Map<string, AuditSession>();
+import type { Finding } from "./types.js";
 
 const splunkConnectSchema = z.object({
   command: z.string().min(1).optional(),
@@ -45,7 +49,7 @@ const splunkQuerySchema = z.object({
 });
 
 // Splunk MCP tool names per docs; keep generic fallbacks for other MCP servers.
-const infoToolPreference = ["splunk_get_info", "get_info", "server_info", "info"] as const;
+const infoToolPreference = ["get_splunk_info", "splunk_get_info", "get_info", "server_info", "info"] as const;
 const queryToolPreference = [
   "splunk_run_query",
   "run_splunk_query",
@@ -63,6 +67,49 @@ const queryArgStrategies = [
 export async function registerRoutes(app: FastifyInstance) {
   app.get("/health", async () => {
     return { ok: true };
+  });
+
+  // Hunt management endpoints
+  app.get("/api/hunts", async () => {
+    try {
+      const hunts = await loadHunts();
+      return {
+        ok: true,
+        hunts: hunts.map(h => getHuntSummary(h))
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: { message: err instanceof Error ? err.message : "Failed to load hunts" }
+      };
+    }
+  });
+
+  app.get("/api/hunts/:id", async (request) => {
+    try {
+      const { id } = request.params as { id: string };
+      const hunt = await loadHunt(id);
+
+      if (!hunt) {
+        return {
+          ok: false,
+          error: { message: "Hunt not found" }
+        };
+      }
+
+      return {
+        ok: true,
+        hunt: {
+          ...getHuntSummary(hunt),
+          content: hunt.content
+        }
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: { message: err instanceof Error ? err.message : "Failed to load hunt" }
+      };
+    }
   });
 
   app.post("/api/splunk/connect", async (request, reply) => {
@@ -101,7 +148,7 @@ export async function registerRoutes(app: FastifyInstance) {
         transport: {
           type: "stdio",
           command: resolvedCommand,
-          args: parsed.data.args,
+          args: parsed.data.args ?? config.splunkMcpArgs,
           env
         }
       });
@@ -200,7 +247,7 @@ export async function registerRoutes(app: FastifyInstance) {
         transport: {
           type: "stdio",
           command: resolvedCommand,
-          args: parsed.data.args,
+          args: parsed.data.args ?? config.splunkMcpArgs,
           env
         }
       });
@@ -291,7 +338,7 @@ export async function registerRoutes(app: FastifyInstance) {
     }
 
     // Generate audit ID
-    const auditId = `audit_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const auditId = `audit_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
 
     // Create audit session
     const session: AuditSession = {
@@ -304,7 +351,8 @@ export async function registerRoutes(app: FastifyInstance) {
         parsed.data.scope ? `[${new Date().toISOString()}] Scope: ${parsed.data.scope}` : null
       ].filter(Boolean) as string[],
       startedAt: Date.now(),
-      config: parsed.data
+      config: parsed.data,
+      findings: []
     };
 
     auditSessions.set(auditId, session);
@@ -384,18 +432,39 @@ export async function registerRoutes(app: FastifyInstance) {
       } satisfies AuditResultsResponse;
     }
 
-    // Return dummy findings that match frontend expectations
+    // Return real findings from hunt execution
+    const findings = session.findings;
+    const evidenceCount = findings.reduce((sum, f) => sum + f.evidenceCount, 0);
+    const avgConfidence = findings.length > 0
+      ? Math.round(findings.reduce((sum, f) => sum + f.confidence, 0) / findings.length)
+      : 0;
+
+    // Calculate risk level based on severity distribution
+    const criticalCount = findings.filter(f => f.severity === "critical").length;
+    const highCount = findings.filter(f => f.severity === "high").length;
+    const riskLevel: "low" | "medium" | "high" | "critical" =
+      criticalCount > 0 ? "critical" :
+      highCount >= 2 ? "high" :
+      highCount >= 1 ? "medium" : "low";
+
+    // Generate summary
+    const summary = findings.length > 0
+      ? `Automated threat hunting identified ${findings.length} finding${findings.length > 1 ? 's' : ''} requiring attention. ` +
+        (highCount > 0 || criticalCount > 0 ? `${highCount + criticalCount} high-priority issue${highCount + criticalCount > 1 ? 's' : ''} detected. ` : '') +
+        `Review detailed findings and recommendations below.`
+      : `No significant security threats detected during automated threat hunting. Continue monitoring and periodic assessments.`;
+
     return {
       ok: true,
       auditId: id,
-      findings: generateDummyFindings(),
+      findings,
       stats: {
-        riskLevel: "medium",
-        totalFindings: 5,
-        avgConfidence: 89,
-        evidenceCount: 217
+        riskLevel,
+        totalFindings: findings.length,
+        avgConfidence,
+        evidenceCount
       },
-      summary: "Your environment shows moderate security posture with 5 findings identified across privilege management, patch management, and access control domains. Immediate attention required for 2 high-severity findings related to privileged account usage and unpatched vulnerabilities.",
+      summary,
       error: null
     } satisfies AuditResultsResponse;
   });
@@ -406,7 +475,7 @@ function simulateAuditProgress(auditId: string): void {
   const stages: Array<{ stage: AuditStage; duration: number; progress: number }> = [
     { stage: "coverage", duration: 2000, progress: 15 },
     { stage: "selecting", duration: 3000, progress: 30 },
-    { stage: "running", duration: 8000, progress: 70 },
+    { stage: "running", duration: 0, progress: 70 }, // Duration will be dynamic based on hunt execution
     { stage: "packaging", duration: 2000, progress: 85 },
     { stage: "report", duration: 3000, progress: 95 },
     { stage: "complete", duration: 1000, progress: 100 }
@@ -414,7 +483,7 @@ function simulateAuditProgress(auditId: string): void {
 
   let currentStageIndex = 0;
 
-  const processNextStage = () => {
+  const processNextStage = async () => {
     const session = auditSessions.get(auditId);
     if (!session || currentStageIndex >= stages.length) return;
 
@@ -423,163 +492,147 @@ function simulateAuditProgress(auditId: string): void {
     session.progress = stageInfo.progress;
 
     // Add stage-specific logs
-    const stageLogs: Record<AuditStage, string[]> = {
-      coverage: [
-        "Connecting to Splunk instance...",
-        "Connection established successfully",
-        "Validating API credentials...",
-        "Credentials validated - read-only access confirmed",
-        "Starting coverage checks...",
-        "Analyzing log sources coverage..."
-      ],
-      selecting: [
-        "Selected 47 threat hunting queries",
-        "Prioritizing queries by threat level...",
-        "Query selection complete"
-      ],
-      running: [
-        "Executing query: Privileged Account Usage",
-        "Executing query: Lateral Movement Detection",
-        "Executing query: Unpatched Systems Scan",
-        "Executing query: Password Policy Compliance",
-        "Executing query: Logging Coverage Analysis",
-        "Query execution complete - 5 findings identified"
-      ],
-      packaging: [
-        "Collecting evidence artifacts...",
-        "Packaging evidence items...",
-        "Evidence collection complete - 217 items"
-      ],
-      report: [
-        "Generating executive summary...",
-        "Compiling detailed findings...",
-        "Generating recommendations...",
-        "Report generation complete"
-      ],
-      complete: [
-        "Audit complete - results ready for review"
-      ]
-    };
+    if (stageInfo.stage === "coverage") {
+      const mcpCommand = session.config.command || config.splunkMcpCommand || "npx";
+      const mcpArgs = session.config.args || config.splunkMcpArgs || [];
+      const mcpEnv = session.config.env || buildSplunkEnv();
 
-    const logsForStage = stageLogs[stageInfo.stage] || [];
-    logsForStage.forEach(log => {
-      session.logs.push(`[${new Date().toISOString()}] ${log}`);
-    });
+      let client: Awaited<ReturnType<typeof createMcpClient>> | null = null;
+      try {
+        session.logs.push(`[${new Date().toISOString()}] Connecting to Splunk instance...`);
+        client = await createMcpClient({
+          name: "artifexai-coverage",
+          version: "0.1.0",
+          timeoutMs: config.requestTimeoutMs,
+          transport: { type: "stdio", command: mcpCommand, args: mcpArgs, env: mcpEnv }
+        });
+        session.logs.push(`[${new Date().toISOString()}] Connection established successfully`);
+
+        const tools = await client.listTools();
+        const toolNames = tools.map(t => t.name);
+        session.logs.push(`[${new Date().toISOString()}] Discovered ${toolNames.length} MCP tools: ${toolNames.join(", ")}`);
+
+        // Validate credentials via get_splunk_info
+        session.logs.push(`[${new Date().toISOString()}] Validating API credentials...`);
+        const infoTool = pickTool(toolNames, infoToolPreference);
+        if (infoTool) {
+          const info = await client.callTool(infoTool, {}) as any;
+          const infoText = info?.content?.[0]?.text ?? JSON.stringify(info);
+          session.logs.push(`[${new Date().toISOString()}] Credentials validated - ${infoTool} responded`);
+          (session as any).splunkInfo = infoText;
+        } else {
+          session.logs.push(`[${new Date().toISOString()}] No info tool found - skipping credential validation`);
+        }
+
+        // Check log source coverage via get_indexes
+        session.logs.push(`[${new Date().toISOString()}] Analyzing log sources coverage...`);
+        const indexTool = pickTool(toolNames, ["get_indexes"] as unknown as readonly string[]);
+        if (indexTool) {
+          const indexes = await client.callTool(indexTool, {}) as any;
+          const indexText = indexes?.content?.[0]?.text ?? JSON.stringify(indexes);
+          try {
+            const parsed = JSON.parse(indexText);
+            // Handle both { results: [...] } and direct array formats
+            const items = parsed?.results ?? (Array.isArray(parsed) ? parsed : null);
+            if (Array.isArray(items)) {
+              const indexNames = items.map((i: any) => i.name || i.title || i);
+              session.logs.push(`[${new Date().toISOString()}] Found ${indexNames.length} indexes: ${indexNames.slice(0, 10).join(", ")}${indexNames.length > 10 ? "..." : ""}`);
+            } else {
+              session.logs.push(`[${new Date().toISOString()}] Indexes retrieved successfully`);
+            }
+          } catch {
+            session.logs.push(`[${new Date().toISOString()}] Indexes retrieved successfully`);
+          }
+        } else {
+          session.logs.push(`[${new Date().toISOString()}] No index tool found - skipping coverage analysis`);
+        }
+
+        session.logs.push(`[${new Date().toISOString()}] Coverage check complete`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Unknown error";
+        session.logs.push(`[${new Date().toISOString()}] Coverage check failed: ${msg}`);
+      } finally {
+        if (client) {
+          try { await client.close(); } catch { /* ignore */ }
+        }
+      }
+    } else if (stageInfo.stage === "selecting") {
+      try {
+        // Load all available hunts
+        const hunts = await loadHunts();
+        session.logs.push(`[${new Date().toISOString()}] Loaded ${hunts.length} threat hunting playbooks`);
+        session.logs.push(`[${new Date().toISOString()}] Prioritizing hunts by threat level...`);
+        session.logs.push(`[${new Date().toISOString()}] Hunt selection complete`);
+
+        // Store hunts in session for running stage
+        (session as any).hunts = hunts;
+      } catch (err) {
+        session.logs.push(`[${new Date().toISOString()}] Error loading hunts: ${err instanceof Error ? err.message : "Unknown error"}`);
+      }
+    } else if (stageInfo.stage === "running") {
+      // Execute hunts using LLM
+      const hunts = (session as any).hunts || [];
+
+      if (hunts.length === 0) {
+        session.logs.push(`[${new Date().toISOString()}] No hunts available to execute`);
+      } else {
+        session.logs.push(`[${new Date().toISOString()}] Starting LLM-guided threat hunting...`);
+
+        // Prepare executor config from session config
+        const executorConfig: HuntExecutorConfig = {
+          mcpCommand: session.config.command || config.splunkMcpCommand || "npx",
+          mcpArgs: session.config.args || config.splunkMcpArgs || [],
+          mcpEnv: session.config.env || buildSplunkEnv(),
+          timeRange: session.config.timeRange
+        };
+
+        // Execute each hunt
+        for (const hunt of hunts) {
+          try {
+            session.logs.push(`[${new Date().toISOString()}] Executing hunt: ${hunt.id}`);
+
+            const findings = await executeHunt(hunt, executorConfig);
+
+            if (findings.length > 0) {
+              session.findings.push(...findings);
+              session.logs.push(`[${new Date().toISOString()}] Hunt ${hunt.id} completed - ${findings.length} finding(s) identified`);
+            } else {
+              session.logs.push(`[${new Date().toISOString()}] Hunt ${hunt.id} completed - no suspicious activity detected`);
+            }
+          } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : "Unknown error";
+            session.logs.push(`[${new Date().toISOString()}] Hunt ${hunt.id} failed: ${errorMsg}`);
+          }
+        }
+
+        session.logs.push(`[${new Date().toISOString()}] All hunts completed - ${session.findings.length} total finding(s)`);
+      }
+    } else if (stageInfo.stage === "packaging") {
+      const evidenceCount = session.findings.reduce((sum, f) => sum + f.evidenceCount, 0);
+      session.logs.push(`[${new Date().toISOString()}] Collecting evidence artifacts...`);
+      session.logs.push(`[${new Date().toISOString()}] Packaging evidence items...`);
+      session.logs.push(`[${new Date().toISOString()}] Evidence collection complete - ${evidenceCount} items`);
+    } else if (stageInfo.stage === "report") {
+      session.logs.push(`[${new Date().toISOString()}] Generating executive summary...`);
+      session.logs.push(`[${new Date().toISOString()}] Compiling detailed findings...`);
+      session.logs.push(`[${new Date().toISOString()}] Generating recommendations...`);
+      session.logs.push(`[${new Date().toISOString()}] Report generation complete`);
+    } else if (stageInfo.stage === "complete") {
+      session.logs.push(`[${new Date().toISOString()}] Audit complete - results ready for review`);
+    }
 
     currentStageIndex++;
 
     if (currentStageIndex < stages.length) {
-      setTimeout(processNextStage, stageInfo.duration);
+      setTimeout(() => processNextStage(), stageInfo.duration);
     }
   };
 
   // Start processing stages
-  setTimeout(processNextStage, 500);
+  setTimeout(() => processNextStage(), 500);
 }
 
 // Generate dummy findings matching frontend expectations
-function generateDummyFindings() {
-  return [
-    {
-      id: "F001",
-      severity: "high" as const,
-      title: "Unauthorized Privileged Account Usage",
-      affectedEntities: ["DC-01", "DC-02", "FILE-SRV-01"],
-      evidenceCount: 23,
-      confidence: 92,
-      description: "Detected privileged account usage outside of normal business hours from suspicious IP addresses. Multiple domain admin accounts showed activity between 2:00 AM and 4:00 AM originating from geographically anomalous locations.",
-      evidence: [
-        "2025-01-15 02:34:12 - Admin account 'DA_ADMIN' logged in from IP 185.220.101.42",
-        "2025-01-15 02:35:48 - Lateral movement detected: DC-01 → FILE-SRV-01",
-        "2025-01-15 02:37:23 - Sensitive file access: /shares/executive/financial_reports/",
-        "2025-01-15 02:39:01 - Privileged group modification detected"
-      ],
-      queries: [
-        "index=windows EventCode=4624 Account_Type=Admin | where hour >= 22 OR hour <= 6",
-        "index=windows EventCode=4648 | stats count by Source_Host Destination_Host"
-      ],
-      recommendation: "Immediately reset credentials for affected privileged accounts. Implement privileged access management (PAM) solution. Enable MFA for all administrative accounts. Conduct forensic investigation of affected systems."
-    },
-    {
-      id: "F002",
-      severity: "high" as const,
-      title: "Unpatched Critical Vulnerabilities",
-      affectedEntities: ["WEB-SRV-03", "WEB-SRV-04", "WEB-SRV-05"],
-      evidenceCount: 18,
-      confidence: 95,
-      description: "Multiple internet-facing web servers running outdated software with known critical CVEs. Systems are missing security patches released over 90 days ago.",
-      evidence: [
-        "WEB-SRV-03: Apache 2.4.49 (CVE-2021-41773 - Critical)",
-        "WEB-SRV-04: Apache 2.4.49 (CVE-2021-41773 - Critical)",
-        "WEB-SRV-05: OpenSSL 1.1.1k (CVE-2021-3711 - High)"
-      ],
-      queries: [
-        "index=vulnerability severity=critical status=open age>90",
-        "index=assets category=web_server | join host [search index=patches status=missing]"
-      ],
-      recommendation: "Emergency patch deployment required within 24 hours. Implement automated patch management. Add vulnerability scanning to CI/CD pipeline."
-    },
-    {
-      id: "F003",
-      severity: "medium" as const,
-      title: "Weak Password Policy Implementation",
-      affectedEntities: ["domain.local", "legacy-app.local"],
-      evidenceCount: 156,
-      confidence: 88,
-      description: "Password policies do not meet industry standards. Detected accounts with passwords that haven't been changed in over 365 days and weak complexity requirements.",
-      evidence: [
-        "156 accounts with password age > 365 days",
-        "Password minimum length: 8 characters (recommended: 14+)",
-        "Password complexity: Not enforced on legacy domain",
-        "Password history: 3 passwords (recommended: 24)"
-      ],
-      queries: [
-        "index=ad EventCode=4724 | stats max(password_age) by user",
-        "index=ad | eval weak_policy=if(min_length<14, \"true\", \"false\")"
-      ],
-      recommendation: "Update domain password policies to enforce 14+ character minimum, complexity requirements, and 24-password history. Implement regular password expiration for privileged accounts."
-    },
-    {
-      id: "F004",
-      severity: "medium" as const,
-      title: "Insufficient Logging Coverage",
-      affectedEntities: ["APP-SRV-01", "APP-SRV-02", "DB-SRV-01"],
-      evidenceCount: 8,
-      confidence: 91,
-      description: "Critical servers missing comprehensive audit logging. Application and database servers not forwarding logs to SIEM, creating blind spots in security monitoring.",
-      evidence: [
-        "APP-SRV-01: No logs received in past 7 days",
-        "APP-SRV-02: Partial logging - only errors captured",
-        "DB-SRV-01: Database audit logs not enabled"
-      ],
-      queries: [
-        "index=* | stats count by host | where count=0",
-        "index=inventory category=critical | join host [search index=logging status=inactive]"
-      ],
-      recommendation: "Deploy logging agents to all critical servers. Enable database audit logging. Implement log retention policy of minimum 90 days. Configure SIEM alerting for logging failures."
-    },
-    {
-      id: "F005",
-      severity: "low" as const,
-      title: "Excessive Service Account Permissions",
-      affectedEntities: ["SVC_BACKUP", "SVC_MONITORING", "SVC_APP1"],
-      evidenceCount: 12,
-      confidence: 85,
-      description: "Service accounts have been granted excessive privileges beyond their operational requirements. Following principle of least privilege, these accounts should have permissions reduced.",
-      evidence: [
-        "SVC_BACKUP: Member of Domain Admins (unnecessary)",
-        "SVC_MONITORING: Full control on C:\\ drive",
-        "SVC_APP1: Local administrator on 45 servers"
-      ],
-      queries: [
-        "index=ad objectClass=serviceAccount | stats list(memberOf) by sAMAccountName",
-        "index=windows EventCode=4672 | search Account_Name=SVC_*"
-      ],
-      recommendation: "Review and reduce service account permissions to minimum required. Implement service account management policy. Use group managed service accounts (gMSA) where possible."
-    }
-  ];
-}
-
 function pickTool(toolNames: string[], preference: readonly string[]): string | null {
   for (const name of preference) {
     if (toolNames.includes(name)) return name;

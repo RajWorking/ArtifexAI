@@ -9,8 +9,10 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.73.0",
     "@artifexai/mcp": "workspace:*",
     "@fastify/cors": "^9.0.1",
+    "dotenv": "^17.2.4",
     "fastify": "^4.28.1",
     "zod": "^3.24.2"
   },
